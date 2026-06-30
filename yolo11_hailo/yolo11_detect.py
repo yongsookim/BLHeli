@@ -46,7 +46,8 @@ except ImportError:
     PICAMERA_AVAILABLE = False
 
 # ──────────────────────────────────────────────────────────────────────────────
-SSD_BASE = Path("/media/kimyongsoo/PI5_SSD")
+_ssd_user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "kimyongsoo"
+SSD_BASE = Path(os.environ.get("SSD_BASE", f"/media/{_ssd_user}/PI5_SSD"))
 DEFAULT_MODEL = SSD_BASE / "models" / "yolo11n.hef"
 DEFAULT_OUTPUT_DIR = SSD_BASE / "detections"
 
@@ -96,11 +97,14 @@ def decode_hailo_output(raw_outputs: dict, conf_thresh: float, nms_thresh: float
                         input_h: int, input_w: int):
     """
     Hailo HEF 출력 디코딩.
-    Hailo Model Zoo YOLO11 HEF는 온디바이스 NMS 결과를
-    (num_detections, [y_min, x_min, y_max, x_max, score, class_id]) 형태로 반환합니다.
+    형태1 (온디바이스 NMS): [N,6] → NMS 불필요, 직접 사용
+    형태2 (원시 앵커):      [H,W,A*(5+C)] → CPU NMS 필요
+    두 형태가 혼재해도 각각 독립 처리하여 이중 NMS를 방지합니다.
     """
-    boxes, scores, class_ids = [], [], []
-    has_raw_output = False  # 형태2(원시 앵커) 출력 존재 여부
+    # 형태1: 온디바이스 NMS 완료 – 이중 NMS 방지를 위해 별도 보관
+    boxes1, scores1, class_ids1 = [], [], []
+    # 형태2: 원시 앵커 텐서 – CPU NMS 적용 후 합산
+    boxes2, scores2, class_ids2 = [], [], []
 
     for name, tensor in raw_outputs.items():
         tensor = np.squeeze(tensor)
@@ -118,16 +122,15 @@ def decode_hailo_output(raw_outputs: dict, conf_thresh: float, nms_thresh: float
                 y1 = (y1 * input_h - pad_top) / scale
                 x2 = (x2 * input_w - pad_left) / scale
                 y2 = (y2 * input_h - pad_top) / scale
-                boxes.append([
+                boxes1.append([
                     max(0, int(x1)), max(0, int(y1)),
                     min(orig_w, int(x2)), min(orig_h, int(y2)),
                 ])
-                scores.append(float(score))
-                class_ids.append(int(cls_id))
+                scores1.append(float(score))
+                class_ids1.append(int(cls_id))
 
         # ── 형태 2: 원시 앵커 텐서 [H, W, A*(5+C)] – CPU NMS 필요 ──────────
         elif tensor.ndim == 3:
-            has_raw_output = True
             h, w, ch = tensor.shape
             num_anchors = ch // (5 + len(COCO_CLASSES))
             if num_anchors == 0:
@@ -156,33 +159,26 @@ def decode_hailo_output(raw_outputs: dict, conf_thresh: float, nms_thresh: float
                         y1 = (y1 - pad_top) / scale
                         x2 = (x2 - pad_left) / scale
                         y2 = (y2 - pad_top) / scale
-                        boxes.append([
+                        boxes2.append([
                             max(0, int(x1)), max(0, int(y1)),
                             min(orig_w, int(x2)), min(orig_h, int(y2)),
                         ])
-                        scores.append(score)
-                        class_ids.append(cls_id)
+                        scores2.append(score)
+                        class_ids2.append(cls_id)
 
-    if not boxes:
-        return [], [], []
+    # 형태2(원시 출력)에만 CPU NMS 적용 후 형태1 결과와 합산
+    if boxes2:
+        indices = cv2.dnn.NMSBoxes(
+            [[b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes2],
+            scores2, conf_thresh, nms_thresh,
+        )
+        if len(indices) > 0:
+            indices = indices.flatten()
+            boxes1 += [boxes2[i] for i in indices]
+            scores1 += [scores2[i] for i in indices]
+            class_ids1 += [class_ids2[i] for i in indices]
 
-    # 형태1(온디바이스 NMS)만 있으면 이중 NMS 방지를 위해 바로 반환
-    if not has_raw_output:
-        return boxes, scores, class_ids
-
-    # 형태2(원시 출력) 포함 시 CPU NMS 적용
-    indices = cv2.dnn.NMSBoxes(
-        [[b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes],
-        scores, conf_thresh, nms_thresh,
-    )
-    if len(indices) == 0:
-        return [], [], []
-    indices = indices.flatten()
-    return (
-        [boxes[i] for i in indices],
-        [scores[i] for i in indices],
-        [class_ids[i] for i in indices],
-    )
+    return boxes1, scores1, class_ids1
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -259,6 +255,8 @@ class HailoYOLO11:
 
     def infer(self, frame: np.ndarray):
         """단일 프레임 추론 → (raw_outputs, scale, pad_left, pad_top)"""
+        if self._input_name is None:
+            raise RuntimeError("Hailo 모델이 초기화되지 않았습니다.")
         img, scale, pad_left, pad_top = preprocess(frame, self.input_h, self.input_w)
         input_data = {self._input_name: np.expand_dims(img, axis=0)}
 
@@ -358,7 +356,14 @@ class CameraSource:
             main={"size": (width, height), "format": "BGR888"},
             raw={"size": capture_size},
         )
-        self._picam.configure(preview_config)
+        try:
+            self._picam.configure(preview_config)
+        except Exception:
+            # 일부 센서는 raw 스트림 크기 제약으로 실패 → raw 없이 재시도
+            preview_config = self._picam.create_preview_configuration(
+                main={"size": (width, height), "format": "BGR888"},
+            )
+            self._picam.configure(preview_config)
         self._picam.start()
         time.sleep(0.8)   # 센서 안정화 대기
 
@@ -442,7 +447,7 @@ def run_detection(args):
     is_image = False
     is_camera = False
 
-    if args.source in ("picam", "0", "1", "2") or str(args.source).isdigit():
+    if args.source == "picam" or str(args.source).isdigit():
         is_camera = True
     elif Path(args.source).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp"):
         is_image = True
@@ -464,6 +469,7 @@ def run_detection(args):
         return
 
     # ── 비디오 / 카메라 처리 ───────────────────────────────────────────────────
+    src = None
     writer = None
     fps_target = 30.0
 
@@ -481,6 +487,7 @@ def run_detection(args):
             sys.exit(f"파일 없음: {args.source}")
         src = cv2.VideoCapture(str(src_path))
         if not src.isOpened():
+            src.release()
             sys.exit(f"비디오를 열 수 없습니다: {args.source}")
         fps_target = src.get(cv2.CAP_PROP_FPS) or 30.0
 
@@ -539,7 +546,8 @@ def run_detection(args):
                     print(f"[스냅샷] {snap}")
 
     finally:
-        src.release()
+        if src is not None:
+            src.release()
         if writer:
             writer.release()
         cv2.destroyAllWindows()

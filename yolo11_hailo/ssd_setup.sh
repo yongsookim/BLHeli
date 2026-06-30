@@ -8,7 +8,7 @@
 
 set -e
 
-MOUNT_USER="kimyongsoo"
+MOUNT_USER="${SUDO_USER:-kimyongsoo}"
 MOUNT_PATH="/media/$MOUNT_USER/PI5_SSD"
 CONFIG_FILE="/boot/firmware/config.txt"
 FSTAB_FILE="/etc/fstab"
@@ -88,8 +88,11 @@ NEEDS_FORMAT=false
 
 if [ -b "$NVME_PART" ]; then
     FS_TYPE=$(blkid -o value -s TYPE "$NVME_PART" 2>/dev/null || echo "")
-    if [ "$FS_TYPE" = "ext4" ] || [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
+    if [ "$FS_TYPE" = "ext4" ]; then
         info "기존 파티션 감지: $NVME_PART ($FS_TYPE) – 포맷 건너뜀"
+    elif [ "$FS_TYPE" = "exfat" ] || [ "$FS_TYPE" = "vfat" ]; then
+        warn "exfat/vfat 파티션 감지: POSIX 권한 미지원 → ext4로 재포맷합니다."
+        NEEDS_FORMAT=true
     else
         warn "파티션 있지만 파일시스템 불명: $FS_TYPE"
         NEEDS_FORMAT=true
@@ -117,6 +120,7 @@ if [ "$NEEDS_FORMAT" = true ]; then
 
     echo "  ext4 포맷 중..."
     mkfs.ext4 -L "PI5_SSD" -F "$NVME_PART"
+    udevadm settle   # 커널이 새 파티션을 처리할 때까지 대기
     info "포맷 완료: $NVME_PART (ext4, 레이블=PI5_SSD)"
 fi
 
@@ -144,7 +148,16 @@ echo ""
 echo "=== [5/6] 부팅 자동 마운트 등록 (fstab) ==="
 # ════════════════════════════════════════════════════════════════
 
-UUID=$(blkid -o value -s UUID "$NVME_PART")
+UUID=$(blkid -o value -s UUID "$NVME_PART" 2>/dev/null || true)
+if [ -z "$UUID" ]; then
+    warn "UUID 읽기 실패 – udevadm settle 후 재시도"
+    udevadm settle
+    UUID=$(blkid -o value -s UUID "$NVME_PART" 2>/dev/null || true)
+fi
+if [ -z "$UUID" ]; then
+    error "UUID를 읽을 수 없습니다. 파티션 포맷을 확인하세요."
+    exit 1
+fi
 FSTAB_ENTRY="UUID=$UUID  $MOUNT_PATH  ext4  defaults,noatime,nofail  0  2"
 
 if grep -q "$UUID" "$FSTAB_FILE"; then

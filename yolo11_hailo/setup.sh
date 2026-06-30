@@ -12,7 +12,7 @@ set -e
 SSD="/media/kimyongsoo/PI5_SSD"
 MODEL_DIR="$SSD/models"
 DETECT_DIR="$SSD/detections"
-VENV_DIR="$HOME/hailo_env"
+VENV_DIR="/home/${SUDO_USER:-$USER}/hailo_env"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 echo "=== [1/8] SSD 디렉토리 생성 ==="

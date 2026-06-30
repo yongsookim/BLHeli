@@ -5,12 +5,14 @@ SSD 경로: /media/kimyongsoo/PI5_SSD
 """
 
 import argparse
+import os
 import shutil
 import json
 import datetime
 from pathlib import Path
 
-SSD_BASE    = Path("/media/kimyongsoo/PI5_SSD")
+_ssd_user = os.environ.get("SUDO_USER") or os.environ.get("USER") or "kimyongsoo"
+SSD_BASE    = Path(os.environ.get("SSD_BASE", f"/media/{_ssd_user}/PI5_SSD"))
 GUIDE_DIR   = SSD_BASE / "guide_photos"
 DATASET_DIR = SSD_BASE / "dataset"
 LOG_DIR     = SSD_BASE / "logs"
@@ -123,34 +125,38 @@ def cmd_capture(args):
     dest_dir = GUIDE_DIR / class_dir_name(idx, name)
     dest_dir.mkdir(parents=True, exist_ok=True)
 
+    import time
+    import cv2
+
     cam = Picamera2(args.camera_id)
-    config = cam.create_still_configuration(
+    # create_preview_configuration: 반복 캡처에 적합한 스트리밍 설정
+    config = cam.create_preview_configuration(
         main={"size": (args.width, args.height), "format": "BGR888"}
     )
     cam.configure(config)
     cam.start()
-
-    import time
-    import cv2
     time.sleep(1.0)
 
     saved = 0
     print(f"  클래스: {class_dir_name(idx, name)}  촬영 매수: {args.count}")
     print("  촬영 중... (각 촬영 후 미리보기 창에서 아무 키나 누르세요)")
 
-    for i in range(args.count):
-        frame = cam.capture_array()
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S%f")
-        dest = dest_dir / f"{name}_{ts}.jpg"
+    try:
+        for i in range(args.count):
+            frame = cam.capture_array()  # BGR888 형식 → BGR 배열 직접 반환
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S%f")
+            dest = dest_dir / f"{name}_{ts}.jpg"
 
-        cv2.imshow(f"캡처 [{i+1}/{args.count}] – {name}", frame[:, :, ::-1])
-        cv2.waitKey(args.interval * 1000 if args.interval > 0 else 0)
-        cv2.imwrite(str(dest), frame[:, :, ::-1])
-        print(f"  [{i+1}/{args.count}] 저장: {dest.name}")
-        saved += 1
+            cv2.imshow(f"캡처 [{i+1}/{args.count}] – {name}", frame)
+            wait_ms = min(args.interval * 1000, 2_000_000) if args.interval > 0 else 0
+            cv2.waitKey(wait_ms)
+            cv2.imwrite(str(dest), frame)
+            print(f"  [{i+1}/{args.count}] 저장: {dest.name}")
+            saved += 1
+    finally:
+        cam.stop()
+        cv2.destroyAllWindows()
 
-    cam.stop()
-    cv2.destroyAllWindows()
     print(f"\n  {saved}장 저장 완료 → {class_dir_name(idx, name)}/")
 
 

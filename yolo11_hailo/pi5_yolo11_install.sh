@@ -39,7 +39,10 @@ fi
 
 # ── 현재 단계 확인 ────────────────────────────────────────────────────────────
 STAGE=1
-[ -f "$STATE_FILE" ] && STAGE=$(cat "$STATE_FILE")
+if [ -f "$STATE_FILE" ]; then
+    STAGE=$(cat "$STATE_FILE" 2>/dev/null || echo "1")
+    [[ "$STAGE" =~ ^[12]$ ]] || STAGE=1
+fi
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 헤더 출력
@@ -149,7 +152,7 @@ ConditionPathExists=$STATE_FILE
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $SCRIPT_PATH
+ExecStart=/bin/bash "$SCRIPT_PATH"
 RemainAfterExit=yes
 
 [Install]
@@ -167,7 +170,7 @@ EOF
     echo -e "${Y}${B}  │    재부팅 후 2단계가 자동으로 실행됩니다.        │${NC}"
     echo -e "${Y}${B}  └─────────────────────────────────────────────────┘${NC}"
     echo ""
-    read -r -p "  지금 재부팅할까요? [Y/n]: " ANS
+    read -r -p "  지금 재부팅할까요? [Y/n]: " ANS || true
     ANS="${ANS:-Y}"
     if [[ "$ANS" =~ ^[Yy]$ ]]; then
         log "재부팅 중..."; sleep 1; reboot

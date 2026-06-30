@@ -43,7 +43,8 @@ fi
 # ── 현재 설치 단계 확인 ───────────────────────────────────────────────────────
 STAGE=1
 if [ -f "$STATE_FILE" ]; then
-    STAGE=$(cat "$STATE_FILE")
+    STAGE=$(cat "$STATE_FILE" 2>/dev/null || echo "1")
+    [[ "$STAGE" =~ ^[12]$ ]] || STAGE=1
 fi
 
 echo "" | tee -a "$LOG_FILE"
@@ -147,7 +148,7 @@ ConditionPathExists=$STATE_FILE
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $SCRIPT_DIR/install.sh
+ExecStart=/bin/bash "$SCRIPT_DIR/install.sh"
 RemainAfterExit=yes
 StandardOutput=journal
 StandardError=journal
@@ -164,7 +165,7 @@ EOF
     echo -e "${YELLOW}${BOLD}  ★ 1단계 완료 – 재부팅이 필요합니다 ★${NC}"
     echo -e "${YELLOW}  재부팅 후 2단계(패키지·모델 설치)가 자동으로 실행됩니다.${NC}"
     echo ""
-    read -r -p "  지금 재부팅하시겠습니까? [Y/n]: " REBOOT_NOW
+    read -r -p "  지금 재부팅하시겠습니까? [Y/n]: " REBOOT_NOW || true
     REBOOT_NOW="${REBOOT_NOW:-Y}"
     if [[ "$REBOOT_NOW" =~ ^[Yy]$ ]]; then
         log "재부팅 중..."
@@ -301,7 +302,7 @@ if [ "$STAGE" -eq 2 ]; then
     # NVMe 속도 간이 테스트
     if mountpoint -q "$MOUNT_PATH"; then
         SPEED=$(dd if=/dev/zero of="$MOUNT_PATH/.speedtest" bs=1M count=128 \
-            conv=fsync 2>&1 | grep -oP '[\d.]+ [MG]B/s' | tail -1 || echo "측정 불가")
+            conv=fsync 2>&1 | grep -oE '[0-9.]+ [MG]B/s' | tail -1 || echo "측정 불가")
         rm -f "$MOUNT_PATH/.speedtest"
         info "NVMe 쓰기 속도: $SPEED"
         df -h "$MOUNT_PATH"
