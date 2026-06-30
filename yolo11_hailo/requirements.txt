@@ -1,0 +1,7 @@
+# Raspberry Pi 5 + Hailo AI HAT+ – YOLO11 Python 의존성
+# hailo_platform 은 Hailo Suite DEB 패키지에서 설치됩니다
+#   https://hailo.ai/developer-zone/sw-downloads/
+
+numpy>=1.24
+opencv-python-headless>=4.8
+picamera2>=0.3.19          # Pi Camera 사용 시
