@@ -2,6 +2,10 @@
 """
 YOLO11 Object Detection - Raspberry Pi 5 + Hailo AI HAT+
 
+지원 카메라:
+  - Arducam UC-261 (IMX519, 16MP, 자동초점)  → --camera-type imx519
+  - Raspberry Pi AI Camera (IMX500, 12MP)    → --camera-type imx500
+  - USB 웹캠                                  → --source 0
 지원 입력: Pi Camera, USB 웹캠, 비디오 파일, 이미지 파일
 SSD 경로: /media/kimyongsoo/PI5_SSD
 """
@@ -276,9 +280,34 @@ class HailoYOLO11:
 # ══════════════════════════════════════════════════════════════════════════════
 
 class CameraSource:
-    """Pi Camera 또는 USB 웹캠 통합 래퍼."""
+    """
+    CSI 카메라 / USB 웹캠 통합 래퍼.
 
-    def __init__(self, source, width=1280, height=720):
+    지원 카메라:
+      imx519 – Arducam UC-261 (16MP, 자동초점)
+      imx500 – Raspberry Pi AI Camera (12MP)
+      usb    – USB 웹캠 (V4L2)
+    """
+
+    # 카메라 모델별 최적 설정
+    _SENSOR_CONFIGS = {
+        "imx519": {
+            "label": "Arducam UC-261 IMX519 16MP (자동초점)",
+            # 풀해상도 4656×3496 → 추론 속도를 위해 절반으로 캡처
+            "capture_size": (2328, 1748),
+            # 연속 자동초점 (AfMode=2) + 빠른 속도 (AfSpeed=1)
+            "af_controls": {"AfMode": 2, "AfSpeed": 1, "AfRange": 2},
+        },
+        "imx500": {
+            "label": "Raspberry Pi AI Camera IMX500 12MP",
+            # 풀해상도 4056×3040 → 절반으로 캡처
+            "capture_size": (2028, 1520),
+            "af_controls": {},   # 고정초점
+        },
+    }
+
+    def __init__(self, source: str, camera_type: str = "auto",
+                 camera_id: int = 0, width: int = 1280, height: int = 720):
         self._use_picam = False
         self._cap = None
         self._picam = None
@@ -286,23 +315,74 @@ class CameraSource:
         self.height = height
 
         if source == "picam" and PICAMERA_AVAILABLE:
-            self._use_picam = True
-            self._picam = Picamera2()
-            config = self._picam.create_preview_configuration(
-                main={"size": (width, height), "format": "BGR888"}
-            )
-            self._picam.configure(config)
-            self._picam.start()
-            time.sleep(0.5)
-            print(f"[카메라] Pi Camera 시작 ({width}×{height})")
+            self._init_picam(camera_type, camera_id, width, height)
         else:
-            idx = int(source) if str(source).isdigit() else source
-            self._cap = cv2.VideoCapture(idx)
-            if not self._cap.isOpened():
-                raise RuntimeError(f"카메라 열기 실패: {source}")
-            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-            print(f"[카메라] USB/V4L2 카메라 시작 (인덱스={source})")
+            self._init_usb(source, width, height)
+
+    def _init_picam(self, camera_type: str, camera_id: int,
+                    width: int, height: int):
+        """picamera2로 CSI 카메라 초기화."""
+        self._use_picam = True
+
+        # 연결된 카메라 목록 조회
+        cameras = Picamera2.global_camera_info()
+        if not cameras:
+            raise RuntimeError("연결된 CSI 카메라가 없습니다.")
+
+        # camera_type=auto 이면 모델명으로 자동 감지
+        resolved_type = camera_type
+        if camera_type == "auto":
+            resolved_type = self._detect_camera_type(cameras, camera_id)
+
+        cfg = self._SENSOR_CONFIGS.get(resolved_type)
+        if cfg:
+            print(f"[카메라] {cfg['label']} (포트={camera_id})")
+        else:
+            print(f"[카메라] Pi Camera (타입={resolved_type}, 포트={camera_id})")
+
+        self._picam = Picamera2(camera_id)
+
+        # 출력 해상도는 요청된 width×height, 센서는 고해상도로 캡처 후 다운스케일
+        capture_size = cfg["capture_size"] if cfg else (width, height)
+        preview_config = self._picam.create_preview_configuration(
+            main={"size": (width, height), "format": "BGR888"},
+            raw={"size": capture_size},
+        )
+        self._picam.configure(preview_config)
+        self._picam.start()
+        time.sleep(0.8)   # 센서 안정화 대기
+
+        # 자동초점 설정 (IMX519 전용)
+        if cfg and cfg["af_controls"]:
+            try:
+                self._picam.set_controls(cfg["af_controls"])
+                print(f"[카메라] 연속 자동초점 활성화")
+            except Exception as e:
+                print(f"[카메라] 자동초점 설정 실패 (무시): {e}")
+
+        print(f"[카메라] 출력 해상도: {width}×{height}")
+
+    @staticmethod
+    def _detect_camera_type(cameras: list, camera_id: int) -> str:
+        """연결된 카메라 정보에서 타입 자동 감지."""
+        if camera_id < len(cameras):
+            model = cameras[camera_id].get("Model", "").lower()
+            if "imx519" in model or "uc-261" in model or "arducam" in model:
+                return "imx519"
+            if "imx500" in model:
+                return "imx500"
+        return "unknown"
+
+    def _init_usb(self, source, width: int, height: int):
+        """V4L2 / USB 웹캠 초기화."""
+        idx = int(source) if str(source).isdigit() else source
+        self._cap = cv2.VideoCapture(idx)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"카메라 열기 실패: {source}")
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # 레이턴시 최소화
+        print(f"[카메라] USB/V4L2 카메라 시작 (인덱스={source}, {width}×{height})")
 
     def read(self):
         if self._use_picam:
@@ -315,6 +395,21 @@ class CameraSource:
             self._picam.stop()
         if self._cap:
             self._cap.release()
+
+    @staticmethod
+    def list_cameras():
+        """연결된 CSI 카메라 목록 출력."""
+        if not PICAMERA_AVAILABLE:
+            print("[오류] picamera2 미설치")
+            return
+        cameras = Picamera2.global_camera_info()
+        if not cameras:
+            print("연결된 CSI 카메라 없음")
+            return
+        print(f"연결된 CSI 카메라 {len(cameras)}대:")
+        for i, cam in enumerate(cameras):
+            print(f"  [{i}] Model={cam.get('Model','?')}  Location={cam.get('Location','?')}"
+                  f"  Rotation={cam.get('Rotation','?')}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -366,7 +461,13 @@ def run_detection(args):
     fps_target = 30.0
 
     if is_camera:
-        src = CameraSource(args.source, args.width, args.height)
+        src = CameraSource(
+            args.source,
+            camera_type=args.camera_type,
+            camera_id=args.camera_id,
+            width=args.width,
+            height=args.height,
+        )
     else:
         src_path = Path(args.source)
         if not src_path.exists():
@@ -463,9 +564,20 @@ def parse_args():
         description="YOLO11 Object Detection – Raspberry Pi 5 + Hailo AI HAT+",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+카메라 타입:
+  imx519  Arducam UC-261 (16MP, 자동초점)  ← CSI 포트 0 또는 1
+  imx500  Raspberry Pi AI Camera (12MP)    ← CSI 포트 0 또는 1
+  auto    모델명 자동 감지 (기본값)
+
 예시:
-  # Pi Camera로 실시간 감지
-  python yolo11_detect.py --source picam
+  # Arducam UC-261 (IMX519) 자동초점 감지
+  python yolo11_detect.py --source picam --camera-type imx519
+
+  # Raspberry Pi AI Camera (IMX500)
+  python yolo11_detect.py --source picam --camera-type imx500
+
+  # CSI 포트 1번 카메라 사용
+  python yolo11_detect.py --source picam --camera-type imx519 --camera-id 1
 
   # USB 웹캠 (인덱스 0)
   python yolo11_detect.py --source 0
@@ -473,15 +585,19 @@ def parse_args():
   # SSD의 동영상 파일
   python yolo11_detect.py --source /media/kimyongsoo/PI5_SSD/videos/input.mp4 --save-video
 
-  # 이미지 파일
-  python yolo11_detect.py --source /media/kimyongsoo/PI5_SSD/images/photo.jpg
-
-  # 커스텀 모델 / 임계값
-  python yolo11_detect.py --source picam --model /media/kimyongsoo/PI5_SSD/models/yolo11s.hef --conf 0.4
+  # 연결된 카메라 목록 확인
+  python yolo11_detect.py --list-cameras
 """,
     )
     parser.add_argument("--source", default="picam",
                         help="입력 소스: picam / 0(USB) / 영상파일경로 / 이미지파일경로")
+    parser.add_argument("--camera-type", default="auto",
+                        choices=["auto", "imx519", "imx500"],
+                        help="카메라 모델 (기본: auto 자동감지)")
+    parser.add_argument("--camera-id", type=int, default=0,
+                        help="CSI 카메라 포트 번호 0 또는 1 (기본: 0)")
+    parser.add_argument("--list-cameras", action="store_true",
+                        help="연결된 CSI 카메라 목록 출력 후 종료")
     parser.add_argument("--model", default=str(DEFAULT_MODEL),
                         help=f"HEF 모델 경로 (기본: {DEFAULT_MODEL})")
     parser.add_argument("--conf", type=float, default=0.35,
@@ -503,4 +619,7 @@ def parse_args():
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.list_cameras:
+        CameraSource.list_cameras()
+        sys.exit(0)
     run_detection(args)
