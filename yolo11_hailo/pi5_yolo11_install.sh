@@ -16,8 +16,8 @@ MOUNT_USER="${SUDO_USER:-kimyongsoo}"
 MOUNT_PATH="/media/$MOUNT_USER/PI5_SSD"
 VENV_DIR="/home/$MOUNT_USER/hailo_env"
 CONFIG_FILE="/boot/firmware/config.txt"
-STATE_FILE="/tmp/.pi5_yolo11_stage"
-LOG_FILE="/tmp/pi5_yolo11_install.log"
+STATE_FILE="/var/lib/pi5-yolo11-install.stage"
+LOG_FILE="/var/log/pi5_yolo11_install.log"
 SCRIPT_PATH="$(realpath "$0")"
 
 # ── 색상 ──────────────────────────────────────────────────────────────────────

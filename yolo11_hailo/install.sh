@@ -16,8 +16,8 @@ set -e
 
 # ── 경로 설정 ──────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-STATE_FILE="/tmp/yolo11_install_stage"
-LOG_FILE="/tmp/yolo11_install.log"
+STATE_FILE="/var/lib/yolo11-install.stage"
+LOG_FILE="/var/log/yolo11_install.log"
 
 MOUNT_USER="${SUDO_USER:-kimyongsoo}"
 MOUNT_PATH="/media/$MOUNT_USER/PI5_SSD"

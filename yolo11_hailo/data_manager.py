@@ -5,7 +5,6 @@ SSD 경로: /media/kimyongsoo/PI5_SSD
 """
 
 import argparse
-import os
 import shutil
 import json
 import datetime
@@ -48,8 +47,7 @@ def cmd_status(_args):
         print("  sudo bash ssd_setup.sh 을 먼저 실행하세요.")
         return
 
-    import shutil as _shutil
-    total, used, free = _shutil.disk_usage(SSD_BASE)
+    total, used, free = shutil.disk_usage(SSD_BASE)
     print(f"\n SSD: {SSD_BASE}")
     print(f"  용량: {total/1e9:.1f} GB  사용: {used/1e9:.1f} GB  여유: {free/1e9:.1f} GB")
     print(f"  사용률: {used/total*100:.1f}%\n")
@@ -127,12 +125,13 @@ def cmd_capture(args):
 
     cam = Picamera2(args.camera_id)
     config = cam.create_still_configuration(
-        main={"size": (args.width, args.height)}
+        main={"size": (args.width, args.height), "format": "BGR888"}
     )
     cam.configure(config)
     cam.start()
 
-    import time, cv2
+    import time
+    import cv2
     time.sleep(1.0)
 
     saved = 0
@@ -146,9 +145,7 @@ def cmd_capture(args):
 
         cv2.imshow(f"캡처 [{i+1}/{args.count}] – {name}", frame[:, :, ::-1])
         cv2.waitKey(args.interval * 1000 if args.interval > 0 else 0)
-
-        import cv2 as _cv2
-        _cv2.imwrite(str(dest), frame[:, :, ::-1])
+        cv2.imwrite(str(dest), frame[:, :, ::-1])
         print(f"  [{i+1}/{args.count}] 저장: {dest.name}")
         saved += 1
 
@@ -174,7 +171,7 @@ def cmd_list_classes(_args):
 
 def cmd_export(args):
     """가이드 사진을 YOLO 학습용 dataset/ 형식으로 내보내기."""
-    import random, cv2
+    import random
 
     split_ratio = {"train": 0.7, "val": 0.2, "test": 0.1}
     exported = {"train": 0, "val": 0, "test": 0}

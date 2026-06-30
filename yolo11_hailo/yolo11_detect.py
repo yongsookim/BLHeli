@@ -15,8 +15,6 @@ import os
 import sys
 import time
 import datetime
-import threading
-import queue
 from pathlib import Path
 
 import cv2
@@ -102,13 +100,14 @@ def decode_hailo_output(raw_outputs: dict, conf_thresh: float, nms_thresh: float
     (num_detections, [y_min, x_min, y_max, x_max, score, class_id]) 형태로 반환합니다.
     """
     boxes, scores, class_ids = [], [], []
+    has_raw_output = False  # 형태2(원시 앵커) 출력 존재 여부
 
     for name, tensor in raw_outputs.items():
         tensor = np.squeeze(tensor)
         if tensor.ndim == 0:
             continue
 
-        # ── 형태 1: NMS 완료 [N, 6]  (y1,x1,y2,x2,score,cls) ──────────────
+        # ── 형태 1: 온디바이스 NMS 완료 [N, 6]  (y1,x1,y2,x2,score,cls) ───
         if tensor.ndim == 2 and tensor.shape[-1] == 6:
             for det in tensor:
                 y1, x1, y2, x2, score, cls_id = det
@@ -126,8 +125,9 @@ def decode_hailo_output(raw_outputs: dict, conf_thresh: float, nms_thresh: float
                 scores.append(float(score))
                 class_ids.append(int(cls_id))
 
-        # ── 형태 2: 앵커 텐서 [H, W, A*(5+C)]  (원시 출력) ─────────────────
+        # ── 형태 2: 원시 앵커 텐서 [H, W, A*(5+C)] – CPU NMS 필요 ──────────
         elif tensor.ndim == 3:
+            has_raw_output = True
             h, w, ch = tensor.shape
             num_anchors = ch // (5 + len(COCO_CLASSES))
             if num_anchors == 0:
@@ -166,7 +166,11 @@ def decode_hailo_output(raw_outputs: dict, conf_thresh: float, nms_thresh: float
     if not boxes:
         return [], [], []
 
-    # NMS (온디바이스 NMS가 없는 경우 대비)
+    # 형태1(온디바이스 NMS)만 있으면 이중 NMS 방지를 위해 바로 반환
+    if not has_raw_output:
+        return boxes, scores, class_ids
+
+    # 형태2(원시 출력) 포함 시 CPU NMS 적용
     indices = cv2.dnn.NMSBoxes(
         [[b[0], b[1], b[2] - b[0], b[3] - b[1]] for b in boxes],
         scores, conf_thresh, nms_thresh,
@@ -314,7 +318,13 @@ class CameraSource:
         self.width = width
         self.height = height
 
-        if source == "picam" and PICAMERA_AVAILABLE:
+        if source == "picam":
+            if not PICAMERA_AVAILABLE:
+                raise RuntimeError(
+                    "[오류] picamera2 미설치 – CSI 카메라를 사용할 수 없습니다.\n"
+                    "  설치: sudo apt install python3-picamera2\n"
+                    "  USB 웹캠 사용 시: --source 0"
+                )
             self._init_picam(camera_type, camera_id, width, height)
         else:
             self._init_usb(source, width, height)
@@ -431,14 +441,11 @@ def run_detection(args):
     # ── 입력 소스 결정 ─────────────────────────────────────────────────────────
     is_image = False
     is_camera = False
-    video_path = None
 
     if args.source in ("picam", "0", "1", "2") or str(args.source).isdigit():
         is_camera = True
     elif Path(args.source).suffix.lower() in (".jpg", ".jpeg", ".png", ".bmp"):
         is_image = True
-    else:
-        video_path = args.source
 
     # ── 이미지 단건 처리 ───────────────────────────────────────────────────────
     if is_image:
@@ -532,10 +539,7 @@ def run_detection(args):
                     print(f"[스냅샷] {snap}")
 
     finally:
-        if is_camera:
-            src.release()
-        else:
-            src.release()
+        src.release()
         if writer:
             writer.release()
         cv2.destroyAllWindows()
